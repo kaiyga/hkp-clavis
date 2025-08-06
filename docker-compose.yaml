@@ -1,0 +1,9 @@
+services:
+  postgres_test:
+    image: postgres:17-alpine 
+    environment:
+      POSTGRES_DB: test_hagrid_db
+      POSTGRES_USER: test_user
+      POSTGRES_PASSWORD: test_password
+    ports:
+      - "5433:5432" 
