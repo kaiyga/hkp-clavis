@@ -1,30 +1,15 @@
 package storage
 
 import (
-	"time"
+	"context"
+	"hkp-clavis/internal/model"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
+	hkp "github.com/emersion/go-openpgp-hkp"
 )
 
 type StorageInterface interface {
-	AddKey(openpgp.EntityList) error
-	GetKeyByUID(uid string) openpgp.EntityList
-	GetKeyByFingerprint(fngr string) openpgp.EntityList
-}
-
-type PGPkey struct {
-	Revoked     bool
-	UpdateTime  time.Time
-	Fingerprint string
-	Packet      string
-	Uids        []*PGPUid
-}
-
-type PGPUid struct {
-	Verify       bool
-	Token        string
-	TokenExpires time.Time
-	Email        string
-	UIDString    string // "Full Name (comment) <email@example.com>"
-	Fingerprint  string
+	Add(ctx context.Context, el openpgp.EntityList) ([]*model.PGPKey, error)
+	Get(ctx context.Context, r *hkp.LookupRequest) (openpgp.EntityList, error)
+	Index(ctx context.Context, r *hkp.LookupRequest) ([]hkp.IndexKey, error)
 }

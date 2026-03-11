@@ -1,4 +1,4 @@
-module gadrid
+module hkp-clavis
 
 go 1.24.4
 
@@ -6,6 +6,8 @@ require (
 	github.com/ProtonMail/go-crypto v1.3.0
 	github.com/emersion/go-openpgp-hkp v0.0.0-20231106091114-bb7c1dad7252
 	github.com/jackc/pgx/v5 v5.7.5
+	github.com/joho/godotenv v1.5.1
+	github.com/lmittmann/tint v1.1.3
 	github.com/stretchr/testify v1.8.1
 )
 

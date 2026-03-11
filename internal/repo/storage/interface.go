@@ -3,7 +3,7 @@ package storage
 import (
 	"context"
 	"fmt"
-	service "gadrid/internal/service/storage"
+	"hkp-clavis/internal/model"
 )
 
 var (
@@ -17,11 +17,11 @@ type StorageRepositotyInterface interface {
 	//
 	// Parameters:
 	//   ctx: Context for the operation.
-	//   keys: A slice of service.PGPkey objects to be added or updated.
+	//   keys: A slice of model.PGPKey objects to be added or updated.
 	//
 	// Returns:
 	//   error: An error if the operation fails, wrapped with context (e.g., database connection issues, SQL execution errors).
-	AddKey(ctx context.Context, keys []*service.PGPkey) error
+	AddKey(ctx context.Context, keys []*model.PGPKey) error
 
 	// VerifyUID updates the verification status of a specific User ID (UID) based on a token.
 	// It checks the token's validity and expiry before setting 'verified' to true and clearing token fields.
@@ -50,11 +50,11 @@ type StorageRepositotyInterface interface {
 	//   fingerprint: The fingerprint of the PGP key to retrieve.
 	//
 	// Returns:
-	//   []*service.PGPkey: A slice containing the retrieved PGP key (or an empty slice if not found).
+	//   []*model.PGPKey: A slice containing the retrieved PGP key (or an empty slice if not found).
 	//   error: Returns an error if:
 	//     - The key is not found (errors.Is(err, ErrKeyNotFound)).
 	//     - Database query or scanning fails.
-	GetKey(ctx context.Context, fingerprint string) ([]*service.PGPkey, error)
+	GetKey(ctx context.Context, fingerprint string) ([]*model.PGPKey, error)
 
 	// Index searches for PGP keys based on a query string.
 	// It matches against UID strings and emails using case-insensitive regular expressions.
@@ -65,9 +65,9 @@ type StorageRepositotyInterface interface {
 	//   q: The query string (treated as a case-insensitive regular expression).
 	//
 	// Returns:
-	//   []*service.PGPkey: A slice of matching PGPKey objects, each containing only their verified UIDs.
+	//   []*model.PGPKey: A slice of matching PGPKey objects, each containing only their verified UIDs.
 	//   error: Returns an error if database query or scanning fails.
-	Index(ctx context.Context, q string) ([]*service.PGPkey, error)
+	Index(ctx context.Context, q string) ([]*model.PGPKey, error)
 	// CleanupStaleKeys identifies and deletes PGP keys that no longer have any associated UIDs.
 	// This method is intended to be run periodically, e.g., by a cron job.
 	//

@@ -12,9 +12,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	repository "gadrid/internal/repo/storage"
-	psqlrepo "gadrid/internal/repo/storage/postgresql"
-	service "gadrid/internal/service/storage"
+	"hkp-clavis/internal/model"
+	repository "hkp-clavis/internal/repo/storage"
+	psqlrepo "hkp-clavis/internal/repo/storage/postgresql"
 )
 
 //go:embed structure.sql
@@ -25,21 +25,23 @@ func TestPostgresqlStorageRepo_AddKey(t *testing.T) {
 	defer pool.Close()
 	defer cleanupTestDB(t, pool)
 
-	repo := psqlrepo.New(context.Background(), pool)
+	mgr := model.NewKeyManager()
+
+	repo := psqlrepo.New(context.Background(), pool, mgr)
 
 	ctx := context.Background()
 
 	// --- Test Case 1: Add a new key ---
 	t.Run("Add new key successfully", func(t *testing.T) {
-		key := &service.PGPkey{
+		key := &model.PGPKey{
 			Fingerprint: "FINGERPRINT_NEW_KEY",
 			Packet:      "-----BEGIN PGP PUBLIC KEY BLOCK-----NEW_KEY_PACKET-----END PGP PUBLIC KEY BLOCK-----",
 			Revoked:     false,
-			Uids: []*service.PGPUid{
+			Uids: []*model.PGPUid{
 				{UIDString: "New User <new@example.com>", Email: "new@example.com", Verify: false, Token: "token1", TokenExpires: time.Now().Add(time.Hour)},
 			},
 		}
-		err := repo.AddKey(ctx, []*service.PGPkey{key})
+		err := repo.AddKey(ctx, []*model.PGPKey{key})
 		require.NoError(t, err)
 
 		// Verify key was added
@@ -60,27 +62,27 @@ func TestPostgresqlStorageRepo_AddKey(t *testing.T) {
 
 	// --- Test Case 2: Update an existing key (packet, revoked status) ---
 	t.Run("Update existing key packet and revoked status", func(t *testing.T) {
-		initialKey := &service.PGPkey{
+		initialKey := &model.PGPKey{
 			Fingerprint: "FINGERPRINT_EXISTING",
 			Packet:      "-----BEGIN PGP PUBLIC KEY BLOCK-----INITIAL_PACKET-----END PGP PUBLIC KEY BLOCK-----",
 			Revoked:     false,
-			Uids: []*service.PGPUid{
+			Uids: []*model.PGPUid{
 				{UIDString: "Existing User <existing@example.com>", Email: "existing@example.com", Verify: false, Token: "initial_token", TokenExpires: time.Now().Add(time.Hour)},
 			},
 		}
-		err := repo.AddKey(ctx, []*service.PGPkey{initialKey})
+		err := repo.AddKey(ctx, []*model.PGPKey{initialKey})
 		require.NoError(t, err)
 
 		// Simulate an update: new packet, revoked true
-		updatedKey := &service.PGPkey{
+		updatedKey := &model.PGPKey{
 			Fingerprint: "FINGERPRINT_EXISTING",
 			Packet:      "-----BEGIN PGP PUBLIC KEY BLOCK-----UPDATED_PACKET-----END PGP PUBLIC KEY BLOCK-----",
 			Revoked:     true,
-			Uids: []*service.PGPUid{
+			Uids: []*model.PGPUid{
 				{UIDString: "Existing User <existing@example.com>", Email: "existing@example.com", Verify: false, Token: "updated_token", TokenExpires: time.Now().Add(time.Hour * 2)},
 			},
 		}
-		err = repo.AddKey(ctx, []*service.PGPkey{updatedKey})
+		err = repo.AddKey(ctx, []*model.PGPKey{updatedKey})
 		require.NoError(t, err)
 
 		// Verify key was updated
@@ -100,28 +102,28 @@ func TestPostgresqlStorageRepo_AddKey(t *testing.T) {
 
 	// --- Test Case 3: Add new UID to existing key ---
 	t.Run("Add new UID to existing key", func(t *testing.T) {
-		key := &service.PGPkey{
+		key := &model.PGPKey{
 			Fingerprint: "FINGERPRINT_ADD_UID",
 			Packet:      "-----BEGIN PGP PUBLIC KEY BLOCK-----ADD_UID_KEY-----END PGP PUBLIC KEY BLOCK-----",
 			Revoked:     false,
-			Uids: []*service.PGPUid{
+			Uids: []*model.PGPUid{
 				{UIDString: "First UID <first@example.com>", Email: "first@example.com", Verify: false, Token: "token_first", TokenExpires: time.Now().Add(time.Hour)},
 			},
 		}
-		err := repo.AddKey(ctx, []*service.PGPkey{key})
+		err := repo.AddKey(ctx, []*model.PGPKey{key})
 		require.NoError(t, err)
 
 		// Add a second UID to the same key
-		updatedKey := &service.PGPkey{
+		updatedKey := &model.PGPKey{
 			Fingerprint: "FINGERPRINT_ADD_UID",
 			Packet:      "-----BEGIN PGP PUBLIC KEY BLOCK-----ADD_UID_KEY_UPDATED-----END PGP PUBLIC KEY BLOCK-----",
 			Revoked:     false,
-			Uids: []*service.PGPUid{
+			Uids: []*model.PGPUid{
 				{UIDString: "First UID <first@example.com>", Email: "first@example.com", Verify: false, Token: "token_first", TokenExpires: time.Now().Add(time.Hour)},
 				{UIDString: "Second UID <second@example.com>", Email: "second@example.com", Verify: false, Token: "token_second", TokenExpires: time.Now().Add(time.Hour)},
 			},
 		}
-		err = repo.AddKey(ctx, []*service.PGPkey{updatedKey})
+		err = repo.AddKey(ctx, []*model.PGPKey{updatedKey})
 		require.NoError(t, err)
 
 		// Verify both UIDs exist
@@ -137,7 +139,9 @@ func TestPostgresqlStorageRepo_VerifyUID(t *testing.T) {
 	defer pool.Close()
 	defer cleanupTestDB(t, pool)
 
-	repo := psqlrepo.New(context.Background(), pool)
+	mgr := model.NewKeyManager()
+
+	repo := psqlrepo.New(context.Background(), pool, mgr)
 	ctx := context.Background()
 
 	// Add a key with an unverified UID
@@ -146,12 +150,12 @@ func TestPostgresqlStorageRepo_VerifyUID(t *testing.T) {
 	uidToken := "verifytoken123"
 	uidExpires := time.Now().Add(time.Hour)
 
-	err := repo.AddKey(ctx, []*service.PGPkey{
+	err := repo.AddKey(ctx, []*model.PGPKey{
 		{
 			Fingerprint: keyFingerprint,
 			Packet:      "...",
 			Revoked:     false,
-			Uids: []*service.PGPUid{
+			Uids: []*model.PGPUid{
 				{UIDString: "Verify Me <" + uidEmail + ">", Email: uidEmail, Verify: false, Token: uidToken, TokenExpires: uidExpires},
 			},
 		},
@@ -198,12 +202,12 @@ func TestPostgresqlStorageRepo_VerifyUID(t *testing.T) {
 		expiredToken := "expiredtoken"
 		expiredTime := time.Now().Add(-time.Hour)
 
-		err := repo.AddKey(ctx, []*service.PGPkey{
+		err := repo.AddKey(ctx, []*model.PGPKey{
 			{
 				Fingerprint: expiredFingerprint,
 				Packet:      "...",
 				Revoked:     false,
-				Uids: []*service.PGPUid{
+				Uids: []*model.PGPUid{
 					{UIDString: "Expired <" + expiredEmail + ">", Email: expiredEmail, Verify: false, Token: expiredToken, TokenExpires: expiredTime},
 				},
 			},
@@ -227,17 +231,18 @@ func TestPostgresqlStorageRepo_GetKey(t *testing.T) {
 	defer pool.Close()
 	defer cleanupTestDB(t, pool)
 
-	repo := psqlrepo.New(context.Background(), pool)
+	mgr := model.NewKeyManager()
+	repo := psqlrepo.New(context.Background(), pool, mgr)
 	ctx := context.Background()
 
 	// Add a key with mixed UIDs (verified and unverified)
 	testFingerprint := "FINGERPRINT_GET_KEY"
-	err := repo.AddKey(ctx, []*service.PGPkey{
+	err := repo.AddKey(ctx, []*model.PGPKey{
 		{
 			Fingerprint: testFingerprint,
 			Packet:      "PACKET_DATA",
 			Revoked:     false,
-			Uids: []*service.PGPUid{
+			Uids: []*model.PGPUid{
 				{UIDString: "Verified User <verified@example.com>", Email: "verified@example.com", Verify: false, Token: "tok_v", TokenExpires: time.Now().Add(time.Hour)},
 				{UIDString: "Unverified User <unverified@example.com>", Email: "unverified@example.com", Verify: false, Token: "tok_uv", TokenExpires: time.Now().Add(time.Hour)},
 				{UIDString: "Another Verified <another@example.com>", Email: "another@example.com", Verify: false, Token: "tok_av", TokenExpires: time.Now().Add(time.Hour)},
@@ -285,27 +290,29 @@ func TestPostgresqlStorageRepo_Index(t *testing.T) {
 	defer pool.Close()
 	defer cleanupTestDB(t, pool)
 
-	repo := psqlrepo.New(context.Background(), pool)
+	mgr := model.NewKeyManager()
+
+	repo := psqlrepo.New(context.Background(), pool, mgr)
 	ctx := context.Background()
 
 	// Add multiple keys with various UIDs
-	keysToLoad := []*service.PGPkey{
+	keysToLoad := []*model.PGPKey{
 		{
 			Fingerprint: "FINGERPRINT_ALPHA", Packet: "alpha_packet", Revoked: false,
-			Uids: []*service.PGPUid{
+			Uids: []*model.PGPUid{
 				{UIDString: "Alpha User <alpha@example.com>", Email: "alpha@example.com", Verify: false, Token: "t1", TokenExpires: time.Now().Add(time.Hour)},
 				{UIDString: "Test Alpha <testalpha@mail.com>", Email: "testalpha@mail.com", Verify: false, Token: "t2", TokenExpires: time.Now().Add(time.Hour)},
 			},
 		},
 		{
 			Fingerprint: "FINGERPRINT_BETA", Packet: "beta_packet", Revoked: false,
-			Uids: []*service.PGPUid{
+			Uids: []*model.PGPUid{
 				{UIDString: "Beta User <beta@example.com>", Email: "beta@example.com", Verify: false, Token: "t3", TokenExpires: time.Now().Add(time.Hour)},
 			},
 		},
 		{
 			Fingerprint: "FINGERPRINT_GAMMA", Packet: "gamma_packet", Revoked: false,
-			Uids: []*service.PGPUid{
+			Uids: []*model.PGPUid{
 				{UIDString: "Gamma User <gamma@example.com>", Email: "gamma@example.com", Verify: false, Token: "t4", TokenExpires: time.Now().Add(time.Hour)},
 				{UIDString: "Test Gamma <testgamma@mail.com>", Email: "testgamma@mail.com", Verify: false, Token: "t5", TokenExpires: time.Now().Add(time.Hour)},
 			},

@@ -5,8 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	repo "gadrid/internal/repo/storage"
-	service "gadrid/internal/service/storage"
+	"hkp-clavis/internal/model"
+	repo "hkp-clavis/internal/repo/storage"
 	"strings"
 	"time"
 
@@ -19,13 +19,71 @@ import (
 //go:embed structure.sql
 var db_struct string
 
+var (
+	insertUid = `
+			insert into pgp_uids(fingerprint, uid, email, verified, verification_token, token_expires_at)
+			values($1, $2, $3, $4, $5, $6)
+			on conflict (fingerprint, uid) do nothing; 
+	`
+	selectUid = `
+		select uid, verification_token, token_expires_at, verified
+		from pgp_uids
+		where fingerprint = $1 and email = $2;
+	`
+	updateUidVerify = `
+		update pgp_uids
+		set verified = true,
+			verification_token = null,
+			token_expires_at = null
+		where fingerprint = $1 and email = $2 and verification_token = $3;
+	`
+	fetchUidVerifed = `
+		select uid, email, verification_token, token_expires_at, verified
+		from pgp_uids
+		where fingerprint = $1 and verified = true;
+	`
+	insertKey = `
+			insert into pgp_keys(fingerprint, packet, revoked, update_time)
+			values($1, $2, $3, now())
+			on conflict (fingerprint) do update set
+				packet = excluded.packet,
+				revoked = excluded.revoked,
+				update_time = now();
+	`
+	selectKeyByFingerprint = `
+		select fingerprint, packet, revoked, update_time
+		from pgp_keys
+		where fingerprint ~* $1;
+	`
+	indexKeyByString = `
+		SELECT 
+			k.fingerprint, k.packet, k.revoked, k.update_time,
+			u.uid, u.email, u.verified, u.verification_token, u.token_expires_at
+		FROM pgp_keys k
+		JOIN pgp_uids u ON k.fingerprint = u.fingerprint
+		WHERE k.fingerprint IN (
+			SELECT DISTINCT fingerprint 
+			FROM pgp_uids 
+			WHERE (uid ~* $1 OR email ~* $1 OR fingerprint ~* $1) AND verified = true
+		)
+		ORDER BY k.fingerprint;
+	`
+	cleanupStaleKeys = `
+        delete from pgp_keys pk
+        where not exists (
+            select 1 from pgp_uids pu where pu.fingerprint = pk.fingerprint
+        );
+    `
+)
+
 type PostgresqlStorageRepo struct {
-	poll *pgxpool.Pool
+	poll    *pgxpool.Pool
+	keyMngr *model.KeyManager
 }
 
 // Get context, url
 // Return postgresql repository
-func New(ctx context.Context, pool *pgxpool.Pool) repo.StorageRepositotyInterface {
+func New(ctx context.Context, pool *pgxpool.Pool, keyManager *model.KeyManager) repo.StorageRepositotyInterface {
 	_, err := pool.Exec(ctx, db_struct)
 	if err != nil {
 		panic(err)
@@ -33,10 +91,12 @@ func New(ctx context.Context, pool *pgxpool.Pool) repo.StorageRepositotyInterfac
 
 	return PostgresqlStorageRepo{
 		poll: pool,
+		// Allocation manager
+		keyMngr: keyManager,
 	}
 }
 
-func (s PostgresqlStorageRepo) AddKey(ctx context.Context, keys []*service.PGPkey) error {
+func (s PostgresqlStorageRepo) AddKey(ctx context.Context, keys []*model.PGPKey) error {
 	tx, err := s.poll.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("error postgresql: AddKey: begin transaction: %w", err)
@@ -46,27 +106,15 @@ func (s PostgresqlStorageRepo) AddKey(ctx context.Context, keys []*service.PGPke
 	for _, k := range keys {
 		fingerprint := k.Fingerprint
 		// Upsert pgp_keys
-		_, err = tx.Exec(ctx, `
-			insert into pgp_keys(fingerprint, packet, revoked, update_time)
-			values($1, $2, $3, now())
-			on conflict (fingerprint) do update set
-				packet = excluded.packet,
-				revoked = excluded.revoked,
-				update_time = now();
-		`, fingerprint, k.Packet, k.Revoked)
+		_, err = tx.Exec(ctx, insertKey, fingerprint, k.Packet, k.Revoked)
 		if err != nil {
 			return fmt.Errorf("error postgresql: AddKey: upsert key %s: %w", fingerprint, err)
 		}
 
 		// Upsert pgp_uids
 		batch := &pgx.Batch{}
-		insertUIDQuery := `
-			insert into pgp_uids(fingerprint, uid, email, verified, verification_token, token_expires_at)
-			values($1, $2, $3, $4, $5, $6)
-			on conflict (fingerprint, uid) do nothing; 
-		`
 		for _, u := range k.Uids {
-			batch.Queue(insertUIDQuery, fingerprint, u.UIDString, u.Email, u.Verify, u.Token, u.TokenExpires)
+			batch.Queue(insertUid, fingerprint, u.UIDString, u.Email, u.Verify, u.Token, u.TokenExpires)
 		}
 
 		br := tx.SendBatch(ctx, batch)
@@ -97,11 +145,7 @@ func (s PostgresqlStorageRepo) VerifyUID(ctx context.Context, fingerprint, email
 	var tokenExpiresAt sql.NullTime
 	var isVerified bool
 
-	row := tx.QueryRow(ctx, `
-		select uid, verification_token, token_expires_at, verified
-		from pgp_uids
-		where fingerprint = $1 and email = $2;
-	`, fingerprint, email)
+	row := tx.QueryRow(ctx, selectUid, fingerprint, email)
 
 	if err = row.Scan(&storedUID, &storedToken, &tokenExpiresAt, &isVerified); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -124,13 +168,7 @@ func (s PostgresqlStorageRepo) VerifyUID(ctx context.Context, fingerprint, email
 	}
 
 	// UPDATE the UID status.
-	result, err := tx.Exec(ctx, `
-		update pgp_uids
-		set verified = true,
-			verification_token = null,
-			token_expires_at = null
-		where fingerprint = $1 and email = $2 and verification_token = $3;
-	`, fingerprint, email, token)
+	result, err := tx.Exec(ctx, updateUidVerify, fingerprint, email, token)
 	if err != nil {
 		return fmt.Errorf("error postgresql: VerifyUID: failed to update UID verification status: %w", err)
 	}
@@ -146,124 +184,115 @@ func (s PostgresqlStorageRepo) VerifyUID(ctx context.Context, fingerprint, email
 	return tx.Commit(ctx)
 }
 
-func (s PostgresqlStorageRepo) GetKey(ctx context.Context, fngprt string) ([]*service.PGPkey, error) {
-	var packet string
-	var fingerprint string
-	var revoked bool
-	var update_time time.Time
+func (s PostgresqlStorageRepo) GetKey(ctx context.Context, fngprt string) (res []*model.PGPKey, err error) {
+	pgpKey := s.keyMngr.Get()
 
-	row := s.poll.QueryRow(ctx, `
-		select fingerprint, packet, revoked, update_time
-		from pgp_keys
-		where fingerprint ~* $1;
-	`, fngprt)
+	defer func() {
+		if err != nil {
+			s.keyMngr.Release(pgpKey)
+		}
+	}()
 
-	if err := row.Scan(&fingerprint, &packet, &revoked, &update_time); err != nil {
+	row := s.poll.QueryRow(ctx, selectKeyByFingerprint, fngprt)
+
+	if err = row.Scan(&pgpKey.Fingerprint, &pgpKey.Packet, &pgpKey.Revoked, &pgpKey.UpdateTime); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, repo.ErrKeyNotFound
 		}
-		return nil, fmt.Errorf("error postgresql: GetKey: failed to scan key data for fingerprint %s: %w", fngprt, err)
+		return nil, fmt.Errorf("error postgresql: GetKey: scan error: %w", err)
 	}
 
-	if !strings.Contains(fingerprint, fngprt) {
+	if !strings.Contains(pgpKey.Fingerprint, fngprt) {
 		return nil, repo.ErrKeyNotFound
 	}
 
-	// Fetch all VERIFIED UIDs for this key.
-	rows, err := s.poll.Query(ctx, `
-		select uid, email, verification_token, token_expires_at, verified
-		from pgp_uids
-		where fingerprint = $1 and verified = true;
-	`, fngprt)
+	rows, err := s.poll.Query(ctx, fetchUidVerifed, pgpKey.Fingerprint)
 	if err != nil {
-		return nil, fmt.Errorf("error postgresql: GetKey: failed to query UIDs for key %s: %w", fngprt, err)
+		return nil, fmt.Errorf("error postgresql: GetKey: query uids error: %w", err)
 	}
 	defer rows.Close()
 
-	var uids []*service.PGPUid
 	for rows.Next() {
-
-		uid := &service.PGPUid{}
+		uid := s.keyMngr.GetUid()
 		var token sql.NullString
 		var tokenExpiresAt sql.NullTime
-		if err := rows.Scan(&uid.UIDString, &uid.Email, &token, &tokenExpiresAt, &uid.Verify); err != nil {
-			return nil, fmt.Errorf("error postgresql: GetKey: failed to scan UID row for key %s: %w", fngprt, err)
+
+		if err = rows.Scan(&uid.UIDString, &uid.Email, &token, &tokenExpiresAt, &uid.Verify); err != nil {
+			s.keyMngr.ReleaseUid(uid)
+			return nil, err
 		}
 
 		uid.Token = token.String
 		uid.TokenExpires = tokenExpiresAt.Time
-
-		uids = append(uids, uid)
-
+		pgpKey.Uids = append(pgpKey.Uids, uid)
 	}
 
 	if err = rows.Err(); err != nil {
-		return nil, fmt.Errorf("error postgresql: GetKey: error after iterating UIDs for key %s: %w", fngprt, err)
+		return nil, err
 	}
 
-	pgpKey := &service.PGPkey{
-		Fingerprint: fngprt,
-		UpdateTime:  update_time,
-		Packet:      packet,
-		Revoked:     revoked,
-		Uids:        uids, // Only verified UIDs included
-	}
-	return []*service.PGPkey{pgpKey}, nil
+	return []*model.PGPKey{pgpKey}, nil
 }
 
-func (s PostgresqlStorageRepo) Index(ctx context.Context, q string) ([]*service.PGPkey, error) {
-	// Search for matching fingerprints based on the query 'q'.
-	fingerprintRows, err := s.poll.Query(ctx, `
-		select distinct fingerprint
-		from pgp_uids
-		where (uid ~* $1 or email ~* $1 or fingerprint ~* $1) and verified = true;
-	`, q)
+func (s PostgresqlStorageRepo) Index(ctx context.Context, q string) (resultKeys []*model.PGPKey, err error) {
+	rows, err := s.poll.Query(ctx, indexKeyByString, q)
 	if err != nil {
-		return nil, fmt.Errorf("error postgresql: Index: failed to query matching fingerprints for '%s': %w", q, err)
+		return nil, fmt.Errorf("postgresql: Index query failed: %w", err)
 	}
-	defer fingerprintRows.Close()
+	defer rows.Close()
 
-	var matchingFingerprints []string
-	for fingerprintRows.Next() {
-		var f string
-		if err := fingerprintRows.Scan(&f); err != nil {
-			return nil, fmt.Errorf("error postgresql: Index: failed to scan fingerprint: %w", err)
-		}
-		matchingFingerprints = append(matchingFingerprints, f)
-	}
-	if err = fingerprintRows.Err(); err != nil {
-		return nil, fmt.Errorf("error postgresql: Index: error after iterating fingerprints: %w", err)
-	}
-
-	if len(matchingFingerprints) == 0 {
-		return []*service.PGPkey{}, nil
-	}
-
-	// For each matching fingerprint, use GetKey to retrieve the full PGPKey object.
-	var resultKeys []*service.PGPkey
-	for _, fingerprint := range matchingFingerprints {
-		keys, err := s.GetKey(ctx, fingerprint)
+	defer func() {
 		if err != nil {
-			if errors.Is(err, repo.ErrKeyNotFound) {
-				continue
-			}
-			return nil, fmt.Errorf("error postgresql: Index: failed to retrieve key %s via GetKey: %w", fingerprint, err)
+			s.keyMngr.Release(resultKeys...)
 		}
-		if len(keys) > 0 {
-			resultKeys = append(resultKeys, keys[0])
+	}()
+
+	var currentKey *model.PGPKey
+
+	for rows.Next() {
+		var fng, packet string
+		var revoked bool
+		var updateTime time.Time
+
+		uidObj := s.keyMngr.GetUid()
+		var token sql.NullString
+		var tokenExpiresAt sql.NullTime
+
+		err = rows.Scan(
+			&fng, &packet, &revoked, &updateTime,
+			&uidObj.UIDString, &uidObj.Email, &uidObj.Verify, &token, &tokenExpiresAt,
+		)
+		if err != nil {
+			s.keyMngr.ReleaseUid(uidObj)
+			return nil, err
 		}
+
+		uidObj.Token = token.String
+		uidObj.TokenExpires = tokenExpiresAt.Time
+		uidObj.Fingerprint = fng
+
+		if currentKey == nil || currentKey.Fingerprint != fng {
+			currentKey = s.keyMngr.Get()
+			currentKey.Fingerprint = fng
+			currentKey.Packet = packet
+			currentKey.Revoked = revoked
+			currentKey.UpdateTime = updateTime
+
+			resultKeys = append(resultKeys, currentKey)
+		}
+
+		currentKey.Uids = append(currentKey.Uids, uidObj)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgresql: Index rows iteration error: %w", err)
 	}
 
 	return resultKeys, nil
 }
+
 func (s PostgresqlStorageRepo) CleanupStaleKeys(ctx context.Context) (int, error) {
-	// The SQL query will delete keys from pgp_keys that have no corresponding entries in pgp_uids.
-	result, err := s.poll.Exec(ctx, `
-		delete from pgp_keys pk
-		where not exists (
-			select 1 from pgp_uids pu where pu.fingerprint = pk.fingerprint
-		);
-	`)
+	result, err := s.poll.Exec(ctx, cleanupStaleKeys)
 	if err != nil {
 		return 0, fmt.Errorf("error postgresql: CleanupStaleKeys: failed to delete stale keys: %w", err)
 	}

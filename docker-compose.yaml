@@ -1,9 +1,41 @@
 services:
-  postgres_test:
-    image: postgres:17-alpine 
+  postgres:
+    image: postgres:17-alpine
+    container_name: clavis_db
     environment:
-      POSTGRES_DB: test_hagrid_db
-      POSTGRES_USER: test_user
-      POSTGRES_PASSWORD: test_password
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # ports:
+    #   - "${POSTGRES_PORT}:${POSTGRES_PORT}"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  clavis:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: clavis_app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - LISTEN_ADDRESS=${LISTEN_ADDRESS}
+      - LISTEN_PORT=${LISTEN_PORT}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_ADDRESS=${POSTGRES_HOST}
+      - POSTGRES_PORT=${POSTGRES_PORT}
+      - POSTGRES_DATABASE=${POSTGRES_DB}
+      - VERIFY_DEFAULT=${VERIFY_DEFAULT}
     ports:
-      - "5433:5432" 
+      - "${EXTERNAL_PORT}:${LISTEN_PORT}"
+    restart: always
+
+volumes:
+  postgres_data:
